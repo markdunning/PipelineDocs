@@ -1,0 +1,136 @@
+\documentclass[a4paper,11pt]{article}
+
+\textwidth=6.2in
+\textheight=8.5in
+\oddsidemargin=.1in
+\evensidemargin=.1in
+\headheight=-.3in
+\parindent=0pt
+
+
+\usepackage{amsthm,ragged2e,marvosym,wasysym}
+\title{Configuring and running Cancer Resequencing Pipelines at CRI}
+\date{Report Generated \today}
+\author{Mark Dunning}
+
+\begin{document}
+
+\maketitle
+
+\section{Introduction}
+
+In this document I describe the pipelines that I have been developing at CRI to support the analysis of Cancer Resequencing projects. The term is used to described projects where paired-end sequencing data has been generated from genomic DNA, and the purpose of the analysis is to look for differences in genome structure when comparing an individual's DNA to the human reference genome, or to a 'normal' sample from the same individual. The main functions that can be performed by the pipeline are as follows;
+
+\begin{itemize}
+\item Create appropriate template meta files from a given sample sheet
+ \item Execution of the Broad GATK recommended bam recalibration steps {\footnote {\tt http://www.broadinstitute.org/gatk/guide/best-practices}}
+ \item SNP- and indel-calling for a set of bam files compared to a reference genome
+ \item Detecting somatic variations (SNP and indel) in a tumour sample compared to a matched normal sample from the same individual
+ \item Calling of larger structural variants (insertions, deletions and inversions) and copy-number changes
+
+\end{itemize}
+
+The pipelines themselves are written using the Bioinformatics Core pipeline framework to control the running of various external variant-calling tools (e.g. the Broad GATK suite) on our LSF cluster. Multiple pipelines can be run on the same project; for instance GATK cleaning can be followed by SNP and indel calling of different types. The pipelines are also independant of whether the whole genome, exome-only or specific regions have been targetted.
+
+\subsection{Pre-requisites}
+
+Prior to running the pipelines in this document, I will assume that the data to be analysed have been stored in bam format and co-ordinate sorted. If multiple sequencing lanes have been run for the sample, they must have been merged into a single bam file. Additionally, the bam file should have been duplicated-marked using Picard, or similar, if appropriate. For targeted-sequencing projects where a very small amount of genome has been sequenced, you would \textbf{not want to mark duplicates} as they would effectively mark most of your data and most analysis tools would skip over such reads.
+
+\section{Setting up a pipeline}
+
+Before running a pipeline you will need to create a \textit{meta file} that defines that variables for the analysis such as the location of the bam files, reference genome and where the output will be created. You will also need to list the name of each bam file that is part of the analysis. The file itself is written in xml format. For smaller projects involving few samples such a file can be manually created quite quickly from a template. However, for projects involving target resequence data of many samples (e.g. the Access Array system), there may be more work invovled. Therefore, I have a created a pipeline that will create a suitable template file for GATK-cleaning and SNV calling from a simple csv file. 
+
+The {\tt MetaGenerator} pipeline is used to create a meta file from a csv sample sheet. Actually, it creates two meta files; one that can be used in GATK-cleaning pipelines and one for SNV-calling. An example meta file for this pipeline is given at {\tt /lustre/mib-cri/exome-test/SetupMultiSample.xml}
+
+{\tt /home/mib-cri/icgc/pipelines/cancerresequencing-1.3-SNAPSHOT/bin/run-pipeline SetupMultiSample.xml}
+
+You can open this xml file up in your favourite text editor to view the contents. The text in the file before the {\tt <variables>} section can be ignored for now, however notice that the {\tt <pipelines>} variable is set to the {\tt MetaGenerator.xml} pipeline, which is responsbile for creating an analysis-specifc meta file from a sample sheet. This sample sheet must be \textbf{comma-separated} with a header line. The first column must refer to the prefix of a bam file that is to be used in the analysis (i.e. anything that comes before the {\tt .bam}). The second column is included for historical reasons (it corresponds to an alternative name for the sample and used to rename some outputs) but for convenience can be set to the same as the first column.
+
+The {\tt <variables>} section contains several parameters that can be altered to the specific circumstances of your analysis;
+
+\begin{itemize}
+\item{outDir} {\it Where the results of the analysis will be written to}
+\item{work} {\it Working directory}
+\item{MergedBams} {\it Where the lane-merged bam files can be found}
+\item{CleanedBams} {\it Where the cleaned-bams will be written to}
+\item{refFASTA} {\it The reference genome that the samples were aligned to in FASTA format}
+\item{regionsFile} {\it A BED file defining the regions that have been targetted.}
+\item{SampleSheet} {\it A sample sheet giving assignment of barcodes to samples}
+\item{blacklistMask} {\it A bed file describing regions of unreliable regions used to flag the variant calls}
+\item{dbSNPVCF} {\it A vcf file of known snps used in GATK recalibration}
+\item{snvMeta} {\it A name for the SNV-calling meta file that will be created}
+\item{gatkMeta} {\it A name for the GATK-cleaning meta file that will be created}
+\item{Template} {\it Location of the template that will be used to produce meta files for your analysis}
+\item{SomaticCalling} {\it if TRUE, information about tumour normal pairs will be used in SNV-calling ({\bf not currently implemented for multi-sample SNVs})}
+\item{GATKPipeline} {\it The name of the pipeline that will be put in the {\tt pipeline} variable of the GATK meta file. }
+\item{SNVPipeline} {\it The name of the pipeline that will be put in the {\tt pipeline} variable of the SNV-meta file. }
+
+\end{itemize}
+
+After running the setup script, you should get two meta files; {\tt GATK-meta.xml} and {\tt SNV-Meta.xml} \footnote{Or whatever file names you specified in the {\tt GATKPipeline} and {\tt SNVPipeline} variables}. These meta files should be pretty similar to the {\tt SetupMultiSample.xml} file, except the {\tt <specialisation>} variable has been created for each line in the sample sheet. A {\tt <GATKinputString>} should also be found, which simply concatenates all the bam files that are requried for the project. This variable will be used in SNV-calling to make calls using data from all samples \footnote{In the future, GATK-cleaning may also be performed across all samples simultaneously}. You will notice that the {\tt <GATKinputString>} variable in the SNV meta file refers to bam files in the {\tt CleanedBams} directory. Therefore the GATK-cleaning step will need to be run before SNV-calling can be done. If you don't wish to run GATK-cleaning, you could change the {\tt CleanedBams} variable to be the same as MergedBams, or copy (better to symbolic link) from the files in {\tt MergedBams} to {\tt CleanedBams}. You will also see that {\tt snpFilterExpression} and {\tt indelFilterExpression} have been created. These are expressions used to filter /flag / prioritise the resulting SNP calls that I took from the GATK website, but can be modified on a per-project basis if required.
+
+\subsection{GATK Cleaning}
+
+The GATK-cleaning pipeline is a multi-step process that writes several intermediate files for each bam file to be cleaned. These are written to the {\tt temp} directory and can be removed once the process is finished. As a rough guide, the cleaning pipeline in full should take a couple of hours on the example dataset. Final, cleaned, bam files are written to the {\tt CleanedBam} directory and are suitable for analysis. If you can't wait to see what the files should look like, there is 'one I made earlier' in the folders {\tt /lustre/mib-cri/dunnin01/exome-test/CleanedBams} and {\tt /lustre/mib-cri/dunnin01/exome-test/temp}. The steps performed for each bam file are listed below, along with the files that they create. Information on the various recommended steps are given on the Broad website \\
+
+{\tt http://www.broadinstitute.org/gatk/guide/best-practices}. 
+
+\begin{itemize}
+ \item Add read groups {\tt temp/*.RG.bam}. Required as some versions of the alignment pipeline did not support read groups
+ \item Create regions for indel-realignment {\tt temp/*.output.intervals}
+ \item Realign around indels {\tt temp/*.realigned.bam}
+ \item Sort realigned bam {\tt temp/*.realigned.sorted.bam}
+ \item Determine covariates for recalibration {\tt temp/*.recalibrated.csv}
+ \item Recalibrate bam {\tt CleanedBams/*.bam}
+\end{itemize}
+
+
+\subsection{Multi-sample SNVs}
+
+\subsubsection{UnifiedGenotyper {\tt GATK.raw.snps.vcf}}
+
+Two separate process are run to call SNPs and indels using the GATK UnifiedGenotyper function which gives output in vcf format \footnote{http://www.1000genomes.org/node/101}. For each variant called, the vcf file will report the genotype for each of the samples in the analysis (i.e. regardless of whether or not the variant was called). 
+
+
+\subsubsection{Variant Filtration{\tt GATK.flagged.snps.vcf}}
+The resultant, raw, calls are then flagged \footnote{The GATK function used is called VariantFiltration, but I prefer to think of it as flagging because no calls are actually removed} for overlap with dbSNP ids. Filtering for potential unreliable calls (e.g. regions with lots of unmapped reads) is also performed using a set of 'hard-filters'. The values for these filters are defined by the variables {\tt<snpFilterExpression>} and {\tt<indelFilterExpression>} in the meta file. This step isn't strictly required due to the introduction of variant recalibration (see below) but is useful to evaluate the performance of the filtering.
+
+\subsubsection{Variant recalibration {\tt GATK.recal.snps.vcf}}
+The broad are recommending a recalibration step on the raw variant calls to give a high-confidence set of calls. This reduces the need for hard-filters (previously recommended) but it is designed to work with larger sample sizes (e.g. 50 samples). 
+
+\subsubsection{SnpEff {\tt GATK.recal.snps.annotated.vcf}}
+
+
+
+\
+
+\subsection{Note: Applying the pipeline to other data}
+
+Although the {\tt MultiSampleSNV} pipeline was written for targetted resequence data, there is no reason why it cannot be applied to exome or whole-genome data with the appropriate meta file. Obviously you should be prepared to wait a bit longer for the results.
+
+
+\subsection{Different callers}
+
+With minimal changes to the meta file, it is possible to run a selection of other SNV callers on the same dataset. Specifically, the {\tt pipeline} should be changed to the {\tt SingleSampleSNV} pipeline (from the same directory as the MultiSampleSNV pipeline that was used by default. Now, rather than using the concatentated {\tt GATKInputString} the pipeline will take bam files as specified in the {\tt <specialisations>} section as input and do SNV-calling in parallel.
+
+\begin{itemize}
+ \item GATK
+ \item samtools
+ \item varscan2 {\tt http://varscan.sourceforge.net/}
+ \item platypus {\tt http://www.well.ox.ac.uk/platypus}
+\end{itemize}
+
+Each caller should provide SNVs and indels, which will be copied to a {\tt Variants} directory. What happens next is still work in progres. Initially it will attempt to make a consensus call of variants that are found by all callers, and then annotate using {\tt annovar}. However, since the callers are likely to have their own quirks it is really clear how this consensus should take place.
+
+\section{Somatic calling}
+
+Calling of somatic SNVs and indels is provided by the {\tt SomaticSNV} pipeline. The type of meta file that is required is slightly different in that each specialisation requires a {\tt barcode} and {\tt MatchedBarcode} variable. These can be created automatically from a barcodes file that has a third column corresponding to the barcode of the matched sample. The {\tt SomaticCalling} variable in the meta file should also be set to true. An example barcode an meta file can be found in {\tt /lustre/mib-cri/dunnin01/data/TEST\_DATA/SomaticTest}. Note the that barcodes referred to here are really just the prefixes of the bam files, and not true barcodes as found in targetted sequencing data.
+
+
+Currently Somatic SNVs are called by SomaticSNiPer and varscan2 producing output in vcf format. The downstream annotation of these files is still under development.
+
+\section{Other pipelines}
+
+The Bioinformatics Core approach to SV (i.e. large insertions, deletions, translocations etc) is still under development. I have implemented the SVMerge {\tt svmerge.sourceforge.net/} pipeline in our LSF framework {\tt SVMerge.xml}. The pipeline combines the results of breakdancer, pindel and SEC to provide merged bed files. It can also do a local assembly to validate putative breakpoints. The CREST split-read mapping pipeline is also available in the {\tt CRESTpipeline.xml} pipeline, which requires matched tumours and normals.
+
+\end{document}
